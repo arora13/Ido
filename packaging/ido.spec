@@ -8,7 +8,6 @@ a = Analysis(
     pathex=[str(root)],
     binaries=[],
     datas=[
-        (str(root / "companion" / "assets"), "companion/assets"),
         (str(root / "web" / "dist"), "web/dist"),
     ],
     hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto"],
