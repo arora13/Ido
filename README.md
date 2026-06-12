@@ -78,7 +78,8 @@ npm run dev
 npm run build
 ```
 
-The same build is deployed to GitHub Pages and served by the local companion.
+The same build is served locally by the companion at http://127.0.0.1:8010 when
+you run `ido serve`.
 
 ## Verification
 
@@ -96,8 +97,8 @@ ido render blender "make a house" --follow-up "add more windows"
   --background --factory-startup --python scripts/blender_smoke.py
 ```
 
-GitHub Actions tests Python on macOS, Windows, and Linux, deploys Pages from
-`main`, and creates companion plus Blender add-on artifacts for version tags.
+GitHub Actions tests Python on macOS, Windows, and Linux, and creates companion
+plus Blender add-on artifacts for version tags.
 
 ## TrueFoundry
 
