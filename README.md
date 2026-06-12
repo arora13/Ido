@@ -6,7 +6,7 @@ idō is one local companion for two separate CAD workflows:
 - `adapters/openscad/` compiles Engineering IR into a watched `.scad` file and
   exports STL, PNG, 3MF, and SVG artifacts.
 
-The shared FastAPI backend, CLI, status model, and desktop pet live on `main`.
+The shared FastAPI backend, CLI, and status model live on `main`.
 Blender and OpenSCAD project state remain separate in v1.
 
 ## Install
@@ -15,7 +15,7 @@ Python 3.11 or newer is required for development.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e '.[dev,desktop]'
+.venv/bin/pip install -e '.[dev]'
 cp .env.example .env
 ```
 
@@ -33,8 +33,6 @@ ido open blender
 ido open openscad
 ido prompt --tool blender "make a house"
 ido prompt --tool openscad "make a bracket with two mounting holes"
-ido pet show
-ido pet hide
 ido status
 ```
 
@@ -48,11 +46,11 @@ Build the add-on archive:
 
 ```bash
 cd adapters/blender
-zip -r cad_agent.zip cad_agent
+zip -r ../../ido_blender.zip ido_blender
 ```
 
 Install it through `Blender → Edit → Preferences → Add-ons → Install from Disk`,
-press `N` in the 3D View, and open the `CAD-Agent` tab. The default backend URL
+press `N` in the 3D View, and open the `idō` tab. The default backend URL
 is `http://127.0.0.1:8010`.
 
 ## OpenSCAD
