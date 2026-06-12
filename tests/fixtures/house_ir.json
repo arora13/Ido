@@ -1,0 +1,152 @@
+{
+  "version": "1.0",
+  "intent": "make a house",
+  "history": [
+    "make a house"
+  ],
+  "units": "meters",
+  "scene": {
+    "objects": [
+      {
+        "id": "house_body",
+        "type": "primitive",
+        "shape": "box",
+        "dimensions": {
+          "width": 8.0,
+          "depth": 6.0,
+          "height": 4.0,
+          "radius": null
+        },
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 2.0
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "label": "main_body",
+        "material": {
+          "color": "#D9B38C",
+          "metallic": 0.0,
+          "roughness": 0.65
+        },
+        "visible": true
+      },
+      {
+        "id": "house_roof",
+        "type": "primitive",
+        "shape": "prism",
+        "dimensions": {
+          "width": 8.8,
+          "depth": 6.8,
+          "height": 2.4,
+          "radius": null
+        },
+        "position": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 5.2
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "label": "roof_prism",
+        "material": {
+          "color": "#8B3A3A",
+          "metallic": 0.0,
+          "roughness": 0.8
+        },
+        "visible": true
+      },
+      {
+        "id": "front_door",
+        "type": "primitive",
+        "shape": "box",
+        "dimensions": {
+          "width": 1.4,
+          "depth": 0.18,
+          "height": 2.5,
+          "radius": null
+        },
+        "position": {
+          "x": 0.0,
+          "y": -3.09,
+          "z": 1.25
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "label": "front_door",
+        "material": {
+          "color": "#5B3924",
+          "metallic": 0.0,
+          "roughness": 0.7
+        },
+        "visible": true
+      },
+      {
+        "id": "window_front_left",
+        "type": "primitive",
+        "shape": "box",
+        "dimensions": {
+          "width": 1.4,
+          "depth": 0.16,
+          "height": 1.3,
+          "radius": null
+        },
+        "position": {
+          "x": -2.3,
+          "y": -3.1,
+          "z": 2.3
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "label": "window_front_left",
+        "material": {
+          "color": "#72B7D2",
+          "metallic": 0.1,
+          "roughness": 0.2
+        },
+        "visible": true
+      },
+      {
+        "id": "window_front_right",
+        "type": "primitive",
+        "shape": "box",
+        "dimensions": {
+          "width": 1.4,
+          "depth": 0.16,
+          "height": 1.3,
+          "radius": null
+        },
+        "position": {
+          "x": 2.3,
+          "y": -3.1,
+          "z": 2.3
+        },
+        "rotation": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "label": "window_front_right",
+        "material": {
+          "color": "#72B7D2",
+          "metallic": 0.1,
+          "roughness": 0.2
+        },
+        "visible": true
+      }
+    ]
+  }
+}
