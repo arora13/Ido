@@ -19,7 +19,8 @@ COPY backend ./backend
 COPY shared ./shared
 COPY companion ./companion
 COPY adapters ./adapters
-COPY ido_blender.zip ./ido_blender.zip
+RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/* \
+    && cd adapters/blender && zip -r /app/ido_blender.zip ido_blender
 COPY --from=web /web/dist ./web/dist
 
 RUN pip install --no-cache-dir .
