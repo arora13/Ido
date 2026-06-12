@@ -4,7 +4,11 @@ import logging
 import os
 
 from backend.config import Settings
-from backend.providers.base import IRGenerationError, IRProvider
+from backend.providers.base import (
+    IRGenerationError,
+    IRProvider,
+    ProviderProgressCallback,
+)
 from backend.providers.fallback import DeterministicProvider
 from backend.providers.openai_provider import OpenAIProvider
 from backend.providers.pioneer_provider import PioneerProvider
@@ -32,6 +36,33 @@ class ResilientProvider:
             return result
         except IRGenerationError as exc:
             logger.warning("primary_provider_failed", extra={"provider_error": str(exc)})
+            result = await self._fallback.generate(prompt, current_ir)
+            self.last_provider_used = self._fallback.name
+            return result
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        current_ir: EngineeringIR | None,
+        progress: ProviderProgressCallback,
+    ) -> EngineeringIR:
+        stream_generate = getattr(self._primary, "generate_stream", None)
+        if stream_generate is None:
+            return await self.generate(prompt, current_ir)
+        try:
+            result = await stream_generate(prompt, current_ir, progress)
+            self.last_provider_used = self._primary.name
+            return result
+        except IRGenerationError as exc:
+            logger.warning("primary_provider_failed", extra={"provider_error": str(exc)})
+            await progress({"type": "code_reset"})
+            await progress(
+                {
+                    "type": "status",
+                    "message": "Using offline fallback...",
+                    "phase": "generating",
+                }
+            )
             result = await self._fallback.generate(prompt, current_ir)
             self.last_provider_used = self._fallback.name
             return result
@@ -70,4 +101,3 @@ def create_provider(settings: Settings) -> IRProvider:
 def inference_provider_name(provider: IRProvider) -> str | None:
     last = getattr(provider, "last_provider_used", None)
     return last if isinstance(last, str) else None
-

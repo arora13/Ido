@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -69,3 +70,71 @@ def test_openai_provider_repairs_invalid_structured_output() -> None:
     assert generated.intent == "make a new house"
     assert generated.history == ["make a new house"]
 
+
+class FakeStream:
+    def __init__(self, valid_ir: EngineeringIR) -> None:
+        encoded = valid_ir.model_dump_json()
+        self.events = [
+            SimpleNamespace(type="response.output_text.delta", delta=encoded[:30]),
+            SimpleNamespace(type="response.output_text.delta", delta=encoded[30:]),
+        ]
+        self.response = FakeResponse(output_parsed=valid_ir)
+
+    def __aiter__(self):
+        self._events = iter(self.events)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def get_final_response(self):
+        return self.response
+
+
+class FakeStreamManager:
+    def __init__(self, stream: FakeStream) -> None:
+        self.stream = stream
+
+    async def __aenter__(self):
+        return self.stream
+
+    async def __aexit__(self, *_args):
+        return None
+
+
+class FakeStreamingResponses:
+    def __init__(self, valid_ir: EngineeringIR) -> None:
+        self.valid_ir = valid_ir
+
+    def stream(self, **_kwargs):
+        return FakeStreamManager(FakeStream(self.valid_ir))
+
+
+class FakeStreamingClient:
+    def __init__(self, valid_ir: EngineeringIR) -> None:
+        self.responses = FakeStreamingResponses(valid_ir)
+
+
+def test_openai_provider_streams_structured_output_deltas() -> None:
+    baseline = run(DeterministicProvider().generate("make a chair", None))
+    provider = OpenAIProvider(client=FakeStreamingClient(baseline), model="test-model")
+    events = []
+
+    generated = run(
+        provider.generate_stream(
+            "make a new chair",
+            None,
+            lambda event: _record_event(events, event),
+        )
+    )
+
+    assert [event["type"] for event in events] == ["code", "code"]
+    assert "".join(event["content"] for event in events) == baseline.model_dump_json()
+    assert generated.intent == "make a new chair"
+
+
+async def _record_event(events, event):
+    events.append(event)

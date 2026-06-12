@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+from queue import Empty, Queue
 from time import perf_counter
 
 import bpy
@@ -71,6 +72,7 @@ class IDO_OT_generate(Operator):
     _started = 0.0
     _count = 0
     _built_items: list | None = None
+    _events: Queue | None = None
 
     def invoke(self, context, event):
         return self.execute(context)
@@ -91,12 +93,17 @@ class IDO_OT_generate(Operator):
         self._response = None
         self._count = 0
         self._built_items = []
+        self._events = Queue()
         self._started = perf_counter()
         properties.code_preview = ""
 
         def request() -> None:
             try:
-                self._result["response"] = client.prompt(prompt, current_ir)
+                self._result["response"] = client.prompt_stream(
+                    prompt,
+                    current_ir,
+                    self._events.put,
+                )
             except Exception as exc:
                 self._result["error"] = str(exc)
 
@@ -104,7 +111,7 @@ class IDO_OT_generate(Operator):
         self._thread.start()
 
         properties.is_generating = True
-        properties.status = "Thinking..."
+        properties.status = "Parsing prompt..."
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.05, window=context.window)
         wm.modal_handler_add(self)
@@ -119,28 +126,28 @@ class IDO_OT_generate(Operator):
         properties = context.scene.ido
 
         if self._builder is None:
-            if self._thread is not None and self._thread.is_alive():
-                elapsed = perf_counter() - self._started
-                dots = "." * (int(elapsed * 2) % 4)
-                properties.status = f"Thinking{dots} {elapsed:.0f}s"
-                _redraw(context)
-                return {"RUNNING_MODAL"}
-
-            error = self._result.get("error")
-            response = self._result.get("response")
-            if error is None and response is not None:
+            self._consume_stream_events(properties)
+            response = self._response or self._result.get("response")
+            if response is not None:
                 if response.get("status") != "ok" or not response.get("ir"):
                     error = (
                         response.get("error")
                         or "; ".join(response.get("validation_errors", []))
                         or "Backend did not return a model"
                     )
+                    return self._fail(context, error)
+                self._response = response
+                self._builder = iter_execute(context, response["ir"])
+                _redraw(context)
+                return {"RUNNING_MODAL"}
+
+            if self._thread is not None and self._thread.is_alive():
+                _redraw(context)
+                return {"RUNNING_MODAL"}
+
+            error = self._result.get("error")
             if error is not None or response is None:
                 return self._fail(context, error or "No response from backend")
-
-            self._response = response
-            self._builder = iter_execute(context, response["ir"])
-            return {"RUNNING_MODAL"}
 
         try:
             index, total, label, item = next(self._builder)
@@ -162,6 +169,38 @@ class IDO_OT_generate(Operator):
         _write_code_text(partial_ir)
         _redraw(context)
         return {"RUNNING_MODAL"}
+
+    def _consume_stream_events(self, properties) -> None:
+        if self._events is None:
+            return
+        while True:
+            try:
+                event = self._events.get_nowait()
+            except Empty:
+                return
+
+            event_type = event.get("type")
+            if event_type == "status":
+                message = str(event.get("message") or "Generating scene...")
+                elapsed = event.get("elapsed_seconds")
+                properties.status = (
+                    f"{message} {elapsed}s"
+                    if isinstance(elapsed, int) and elapsed > 0
+                    else message
+                )
+            elif event_type == "object":
+                lines = properties.code_preview.split("\n") if properties.code_preview else []
+                lines.append(_stream_object_line(event))
+                properties.code_preview = "\n".join(lines[-PREVIEW_LINES:])
+            elif event_type == "code":
+                if not properties.code_preview:
+                    properties.status = "Streaming generated scene..."
+            elif event_type == "code_reset":
+                properties.code_preview = ""
+            elif event_type in {"done", "error"} and isinstance(event.get("result"), dict):
+                self._response = event["result"]
+            elif event_type == "error":
+                self._result["error"] = str(event.get("message") or "Generation failed")
 
     def _finish(self, context):
         properties = context.scene.ido
@@ -186,7 +225,8 @@ class IDO_OT_generate(Operator):
 
     def _fail(self, context, message: str):
         properties = context.scene.ido
-        request_id = (self._result or {}).get("response", {}).get("request_id")
+        response = self._response or (self._result or {}).get("response", {})
+        request_id = response.get("request_id")
         duration_ms = (perf_counter() - self._started) * 1000
         execution = self._report_execution(properties, request_id, "error", duration_ms, message)
         if execution:
@@ -227,6 +267,7 @@ class IDO_OT_generate(Operator):
             self._timer = None
         self._thread = None
         self._builder = None
+        self._events = None
 
 
 class IDO_OT_view_code(Operator):
@@ -392,7 +433,7 @@ class IDO_PT_sidebar(Panel):
 
         if properties.code_preview:
             live_box = layout.box()
-            live_box.label(text="Live code", icon="SCRIPT")
+            live_box.label(text="Live generation", icon="SCRIPT")
             lines_col = live_box.column(align=True)
             lines_col.scale_y = 0.8
             for line in properties.code_preview.split("\n"):
@@ -478,6 +519,14 @@ def _preview_line(item: dict) -> str:
     if kind == "operation":
         return f"= {item.get('operation', '?')} {object_id} ({children})"
     return f"# group {object_id} ({children})"
+
+
+def _stream_object_line(event: dict) -> str:
+    item = event.get("item")
+    if isinstance(item, dict):
+        return _preview_line(item)
+    object_type = event.get("object_type", "object")
+    return f"+ ready {object_type} {event.get('name') or event.get('id', '?')}"
 
 
 def _redraw(context) -> None:

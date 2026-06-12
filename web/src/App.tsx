@@ -68,6 +68,76 @@ type PromptResult = {
   trace?: Array<{ step?: string; status?: string; metadata?: { inference_provider?: string } }>
 }
 
+type PromptStreamEvent =
+  | { type: 'status'; message?: string; elapsed_seconds?: number }
+  | {
+      type: 'object'
+      id?: string
+      name?: string
+      object_type?: string
+      shape?: string
+      status?: string
+    }
+  | { type: 'code'; content?: string }
+  | { type: 'code_reset' }
+  | { type: 'done'; result?: PromptResult }
+  | { type: 'error'; message?: string; result?: PromptResult }
+
+async function readPromptStream(
+  response: Response,
+  onEvent: (event: PromptStreamEvent) => void,
+) {
+  if (!response.ok) {
+    throw new Error(`Generation request failed with HTTP ${response.status}`)
+  }
+  if (!response.body) {
+    throw new Error('Generation response did not include a stream')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finished = false
+
+  const consumeFrames = (final = false) => {
+    buffer += final ? decoder.decode() : ''
+    const normalized = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    const frames = normalized.split('\n\n')
+    if (final) {
+      buffer = ''
+    } else {
+      buffer = frames.pop() ?? ''
+    }
+    for (const frame of frames) {
+      const data = frame
+        .split('\n')
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (!data) continue
+      const event = JSON.parse(data) as PromptStreamEvent
+      onEvent(event)
+      if (event.type === 'done' || event.type === 'error') finished = true
+    }
+  }
+
+  while (!finished) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    consumeFrames()
+  }
+  if (!finished) {
+    consumeFrames(true)
+  }
+  if (finished) {
+    await reader.cancel()
+  }
+  if (!finished) {
+    throw new Error('Generation stream ended before a final result')
+  }
+}
+
 const downloadLinks = [
   ['macOS', `${RELEASES}/ido-macos.dmg`, 'Apple Silicon + Intel'],
   ['Windows', `${RELEASES}/ido-windows.exe`, 'Windows 10 and 11'],
@@ -303,6 +373,9 @@ function LocalControl() {
   const [lastResult, setLastResult] = useState<PromptResult | null>(null)
   const [lastPrompt, setLastPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [generationStatus, setGenerationStatus] = useState('')
+  const [generatedObjects, setGeneratedObjects] = useState<SceneObject[]>([])
+  const [streamedCode, setStreamedCode] = useState('')
   const local = ['localhost', '127.0.0.1'].includes(window.location.hostname)
 
   useEffect(() => {
@@ -336,8 +409,11 @@ function LocalControl() {
     event.preventDefault()
     if (!prompt.trim()) return
     setSubmitting(true)
+    setGenerationStatus(tool === 'blender' ? 'Parsing prompt...' : 'Generating...')
+    setGeneratedObjects([])
+    setStreamedCode('')
     const submittedPrompt = prompt.trim()
-    const path = tool === 'openscad' ? '/api/openscad/prompt' : '/api/prompt'
+    const path = tool === 'openscad' ? '/api/openscad/prompt' : '/api/prompt/stream'
     const currentIr =
       lastResult?.status === 'ok' && lastResult.ir ? lastResult.ir : null
     const payload =
@@ -345,15 +421,77 @@ function LocalControl() {
         ? { prompt: submittedPrompt, current_ir: currentIr }
         : { prompt: submittedPrompt, current_ir: currentIr, target_tool: 'blender' }
     try {
-      const response = await fetch(path, {
+      let response = await fetch(path, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      const body = await response.json()
-      setLastResult(body)
+      if (tool === 'blender' && [404, 405].includes(response.status)) {
+        setGenerationStatus('Streaming unavailable; waiting for generation...')
+        response = await fetch('/api/prompt', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        const body = await response.json()
+        setLastResult(body)
+        setGenerationStatus('')
+        setLastPrompt(submittedPrompt)
+        setPrompt('')
+        return
+      }
+      if (tool === 'blender') {
+        await readPromptStream(response, (streamEvent) => {
+          if (streamEvent.type === 'status') {
+            const elapsed = streamEvent.elapsed_seconds
+            setGenerationStatus(
+              `${streamEvent.message ?? 'Generating scene...'}${
+                elapsed && elapsed > 0 ? ` ${elapsed}s` : ''
+              }`,
+            )
+          } else if (streamEvent.type === 'object') {
+            const item = {
+              id: streamEvent.id ?? streamEvent.name ?? 'object',
+              label: streamEvent.name ?? streamEvent.id ?? 'object',
+              type: streamEvent.object_type,
+            }
+            setGeneratedObjects((current) =>
+              current.some((existing) => existing.id === item.id)
+                ? current
+                : [...current, item],
+            )
+          } else if (streamEvent.type === 'code') {
+            setGenerationStatus('Streaming generated scene...')
+            setStreamedCode((current) =>
+              `${current}${streamEvent.content ?? ''}`.slice(-8000),
+            )
+          } else if (streamEvent.type === 'code_reset') {
+            setStreamedCode('')
+            setGeneratedObjects([])
+          } else if (streamEvent.type === 'done' && streamEvent.result) {
+            setLastResult(streamEvent.result)
+            setGenerationStatus('Blender scene is ready')
+          } else if (streamEvent.type === 'error') {
+            setLastResult(
+              streamEvent.result ?? {
+                status: 'error',
+                error: streamEvent.message ?? 'Generation failed',
+              },
+            )
+            setGenerationStatus(streamEvent.message ?? 'Generation failed')
+          }
+        })
+      } else {
+        const body = await response.json()
+        setLastResult(body)
+        setGenerationStatus('')
+      }
       setLastPrompt(submittedPrompt)
       setPrompt('')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Generation failed'
+      setLastResult({ status: 'error', error: message })
+      setGenerationStatus(message)
     } finally {
       setSubmitting(false)
     }
@@ -410,6 +548,21 @@ function LocalControl() {
         />
         <button disabled={submitting}>{submitting ? 'Working' : 'Prompt'}</button>
       </form>
+      {(submitting || generatedObjects.length > 0) && (
+        <div className="generation-progress" aria-live="polite">
+          <strong>{generationStatus || 'Generating scene...'}</strong>
+          {generatedObjects.length > 0 && (
+            <ol>
+              {generatedObjects.map((item) => (
+                <li key={item.id}>
+                  <code>{item.type ?? 'object'}</code> {item.label}
+                </li>
+              ))}
+            </ol>
+          )}
+          {streamedCode && <pre>{streamedCode}</pre>}
+        </div>
+      )}
       {lastResult && (
         <div className="prompt-result">
           <strong>

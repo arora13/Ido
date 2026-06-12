@@ -5,7 +5,7 @@ import os
 
 from openai import AsyncOpenAI
 
-from backend.providers.base import IRGenerationError
+from backend.providers.base import IRGenerationError, ProviderProgressCallback
 from shared.ir import EngineeringIR
 from shared.validation import IRValidationError, parse_and_validate_ir
 
@@ -90,6 +90,64 @@ class OpenAIProvider:
                     text_format=EngineeringIR,
                     max_output_tokens=32_000,
                 )
+                parsed = response.output_parsed
+                if parsed is None:
+                    raise IRGenerationError("OpenAI returned no parsed IR")
+                validated = parse_and_validate_ir(parsed)
+                return validated.model_copy(
+                    update={
+                        "intent": prompt,
+                        "history": [*prior_history, prompt],
+                    }
+                )
+            except (IRValidationError, IRGenerationError, ValueError) as exc:
+                last_error = exc
+                payload["repair_instruction"] = (
+                    "The previous output failed validation. Return a corrected complete IR."
+                )
+                payload["validation_error"] = str(exc)
+            except Exception as exc:
+                raise IRGenerationError(f"OpenAI request failed: {exc}") from exc
+
+        raise IRGenerationError(f"OpenAI returned invalid IR: {last_error}")
+
+    async def generate_stream(
+        self,
+        prompt: str,
+        current_ir: EngineeringIR | None,
+        progress: ProviderProgressCallback,
+    ) -> EngineeringIR:
+        prior_history = current_ir.history if current_ir else []
+        payload = {
+            "current_ir": current_ir.model_dump(mode="json") if current_ir else None,
+            "history": prior_history,
+            "user_prompt": prompt,
+        }
+
+        last_error: Exception | None = None
+        for attempt in range(2):
+            if attempt:
+                await progress({"type": "code_reset"})
+                await progress(
+                    {
+                        "type": "status",
+                        "message": "Repairing generated scene...",
+                        "phase": "generating",
+                    }
+                )
+            try:
+                async with self._client.responses.stream(
+                    model=self._model,
+                    instructions=SYSTEM_INSTRUCTIONS,
+                    input=json.dumps(payload, separators=(",", ":")),
+                    text_format=EngineeringIR,
+                    max_output_tokens=32_000,
+                ) as stream:
+                    async for event in stream:
+                        if event.type == "response.output_text.delta" and event.delta:
+                            await progress({"type": "code", "content": event.delta})
+                    response = await stream.get_final_response()
+
                 parsed = response.output_parsed
                 if parsed is None:
                     raise IRGenerationError("OpenAI returned no parsed IR")

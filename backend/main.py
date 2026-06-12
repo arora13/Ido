@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
 import os
 from pathlib import Path
+from time import monotonic
+from typing import Awaitable, Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend import __version__
@@ -43,6 +48,7 @@ from shared.ir import EngineeringIR
 from shared.validation import IRValidationError, parse_and_validate_ir
 
 logger = logging.getLogger("cad_agent.api")
+ProgressCallback = Callable[[dict[str, object]], Awaitable[None]]
 
 
 def _response_from_bundle(
@@ -71,6 +77,77 @@ def _provider_metadata(provider: IRProvider, **extra: object) -> dict[str, objec
         metadata["inference_provider"] = inference
     metadata.update(extra)
     return metadata
+
+
+def _sse(event: dict[str, object]) -> str:
+    return f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+
+
+class StreamedObjectParser:
+    """Extract complete top-level objects from a streamed scene.objects array."""
+
+    def __init__(self) -> None:
+        self._text = ""
+        self._cursor = 0
+        self._in_objects = False
+        self._start: int | None = None
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def feed(self, delta: str) -> list[dict[str, object]]:
+        self._text += delta
+        if not self._in_objects:
+            key_index = self._text.find('"objects"')
+            if key_index < 0:
+                return []
+            array_index = self._text.find("[", key_index + len('"objects"'))
+            if array_index < 0:
+                return []
+            self._in_objects = True
+            self._cursor = array_index + 1
+
+        objects: list[dict[str, object]] = []
+        while self._cursor < len(self._text):
+            char = self._text[self._cursor]
+            if self._start is None:
+                if char == "]":
+                    self._cursor += 1
+                    break
+                if char != "{":
+                    self._cursor += 1
+                    continue
+                self._start = self._cursor
+                self._depth = 1
+                self._in_string = False
+                self._escaped = False
+                self._cursor += 1
+                continue
+
+            if self._in_string:
+                if self._escaped:
+                    self._escaped = False
+                elif char == "\\":
+                    self._escaped = True
+                elif char == '"':
+                    self._in_string = False
+            elif char == '"':
+                self._in_string = True
+            elif char == "{":
+                self._depth += 1
+            elif char == "}":
+                self._depth -= 1
+                if self._depth == 0:
+                    raw = self._text[self._start : self._cursor + 1]
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        objects.append(parsed)
+                    self._start = None
+            self._cursor += 1
+        return objects
 
 
 def create_app(
@@ -178,22 +255,80 @@ def create_app(
     async def health() -> HealthResponse:
         return HealthResponse(provider=resolved_provider.name)
 
-    @app.post("/api/prompt", response_model=PromptResponse)
-    async def prompt(request: PromptRequest) -> PromptResponse:
-        request_id = new_request_id()
+    async def generate_prompt(
+        request: PromptRequest,
+        *,
+        request_id: str,
+        progress: ProgressCallback | None = None,
+    ) -> PromptResponse:
+        async def emit(event: dict[str, object]) -> None:
+            if progress is not None:
+                await progress(event)
+
         statuses.update(
             tool="blender",
             phase="generating",
             message="Generating Blender scene",
             request_id=request_id,
         )
+        await emit(
+            {
+                "type": "status",
+                "message": "Generating scene...",
+                "phase": "generating",
+                "request_id": request_id,
+            }
+        )
         parse_timer = StepTimer()
         await traces.record(request_id, "parse", "started")
+        streamed_objects = StreamedObjectParser()
+        emitted_object_ids: set[str] = set()
+
+        async def provider_progress(event: dict[str, object]) -> None:
+            event_type = event.get("type")
+            if event_type == "code_reset":
+                streamed_objects.reset()
+                emitted_object_ids.clear()
+                await emit(event)
+                return
+            if event_type != "code":
+                await emit(event)
+                return
+
+            await emit(event)
+            content = event.get("content")
+            if not isinstance(content, str):
+                return
+            for item in streamed_objects.feed(content):
+                object_id = item.get("id")
+                if not isinstance(object_id, str) or object_id in emitted_object_ids:
+                    continue
+                emitted_object_ids.add(object_id)
+                await emit(
+                    {
+                        "type": "object",
+                        "id": object_id,
+                        "name": item.get("label") or object_id,
+                        "object_type": item.get("type") or "object",
+                        "shape": item.get("shape"),
+                        "item": item,
+                        "status": "generated",
+                    }
+                )
+
         try:
-            generated = await resolved_provider.generate(
-                request.prompt,
-                request.current_ir,
-            )
+            stream_generate = getattr(resolved_provider, "generate_stream", None)
+            if progress is not None and stream_generate is not None:
+                generated = await stream_generate(
+                    request.prompt,
+                    request.current_ir,
+                    provider_progress,
+                )
+            else:
+                generated = await resolved_provider.generate(
+                    request.prompt,
+                    request.current_ir,
+                )
             await traces.record(
                 request_id,
                 "parse",
@@ -217,7 +352,7 @@ def create_app(
                 prompt=request.prompt,
                 target_tool=request.target_tool,
             )
-            return PromptResponse(
+            response = PromptResponse(
                 **_response_from_bundle(
                     bundle,
                     trace=trace,
@@ -227,7 +362,28 @@ def create_app(
                     provider=resolved_provider.name,
                 )
             )
+            await emit(
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "result": response.model_dump(mode="json"),
+                }
+            )
+            return response
 
+        statuses.update(
+            phase="validating",
+            message="Validating generated scene",
+            request_id=request_id,
+        )
+        await emit(
+            {
+                "type": "status",
+                "message": "Validating generated scene...",
+                "phase": "validating",
+                "request_id": request_id,
+            }
+        )
         validation_timer = StepTimer()
         await traces.record(request_id, "validate", "started")
         try:
@@ -252,7 +408,7 @@ def create_app(
                 prompt=request.prompt,
                 target_tool=request.target_tool,
             )
-            return PromptResponse(
+            response = PromptResponse(
                 **_response_from_bundle(
                     bundle,
                     trace=trace,
@@ -263,12 +419,47 @@ def create_app(
                     provider=resolved_provider.name,
                 )
             )
+            await emit(
+                {
+                    "type": "error",
+                    "message": "Generated IR failed validation",
+                    "result": response.model_dump(mode="json"),
+                }
+            )
+            return response
 
         await traces.record(
             request_id,
             "validate",
             "completed",
             duration_ms=validation_timer.elapsed_ms,
+        )
+        for item in validated.scene.objects:
+            if item.id in emitted_object_ids:
+                continue
+            await emit(
+                {
+                    "type": "object",
+                    "id": item.id,
+                    "name": item.label,
+                    "object_type": item.type,
+                    "shape": getattr(item, "shape", None),
+                    "item": item.model_dump(mode="json"),
+                    "status": "generated",
+                }
+            )
+        statuses.update(
+            phase="generating",
+            message="Preparing Blender scene",
+            request_id=request_id,
+        )
+        await emit(
+            {
+                "type": "status",
+                "message": "Preparing Blender scene...",
+                "phase": "routing",
+                "request_id": request_id,
+            }
         )
         route_timer = StepTimer()
         await traces.record(
@@ -310,7 +501,7 @@ def create_app(
             message="Blender scene is ready",
             request_id=request_id,
         )
-        return PromptResponse(
+        response = PromptResponse(
             **_response_from_bundle(
                 bundle,
                 trace=trace,
@@ -319,6 +510,111 @@ def create_app(
                 request_id=request_id,
                 provider=resolved_provider.name,
             )
+        )
+        await emit(
+            {
+                "type": "status",
+                "message": "Blender scene is ready",
+                "phase": "completed",
+                "request_id": request_id,
+            }
+        )
+        return response
+
+    @app.post("/api/prompt", response_model=PromptResponse)
+    async def prompt(request: PromptRequest) -> PromptResponse:
+        return await generate_prompt(request, request_id=new_request_id())
+
+    @app.post("/api/prompt/stream")
+    async def prompt_stream(
+        request: PromptRequest,
+        http_request: FastAPIRequest,
+    ) -> StreamingResponse:
+        request_id = new_request_id()
+
+        async def event_generator():
+            queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            started = monotonic()
+            latest_message = "Parsing prompt..."
+
+            async def publish(event: dict[str, object]) -> None:
+                await queue.put(event)
+
+            yield _sse(
+                {
+                    "type": "status",
+                    "message": latest_message,
+                    "phase": "parsing",
+                    "request_id": request_id,
+                    "elapsed_seconds": 0,
+                }
+            )
+            task = asyncio.create_task(
+                generate_prompt(
+                    request,
+                    request_id=request_id,
+                    progress=publish,
+                )
+            )
+            try:
+                while True:
+                    if await http_request.is_disconnected():
+                        task.cancel()
+                        break
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        if event.get("type") == "status":
+                            latest_message = str(event.get("message") or latest_message)
+                        yield _sse(event)
+                        if event.get("type") == "error":
+                            await task
+                            break
+                    except TimeoutError:
+                        if task.done():
+                            response = await task
+                            yield _sse(
+                                {
+                                    "type": "done",
+                                    "result": response.model_dump(mode="json"),
+                                }
+                            )
+                            break
+                        yield _sse(
+                            {
+                                "type": "status",
+                                "message": latest_message,
+                                "phase": "generating",
+                                "request_id": request_id,
+                                "elapsed_seconds": int(monotonic() - started),
+                            }
+                        )
+
+                    if task.done() and queue.empty():
+                        response = await task
+                        yield _sse(
+                            {
+                                "type": "done",
+                                "result": response.model_dump(mode="json"),
+                            }
+                        )
+                        break
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+            finally:
+                if not task.done():
+                    task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.post("/api/execution", response_model=ExecutionResponse)

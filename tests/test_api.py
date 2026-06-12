@@ -1,3 +1,6 @@
+import asyncio
+import json
+from time import monotonic
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
@@ -13,6 +16,36 @@ class FailingProvider:
 
     async def generate(self, _prompt, _current_ir):
         raise IRGenerationError("provider unavailable")
+
+
+class SlowProvider:
+    name = "slow"
+
+    async def generate(self, prompt, current_ir):
+        await asyncio.sleep(1.1)
+        return await DeterministicProvider().generate(prompt, current_ir)
+
+
+class StreamingProvider:
+    name = "streaming"
+
+    async def generate(self, prompt, current_ir):
+        return await DeterministicProvider().generate(prompt, current_ir)
+
+    async def generate_stream(self, prompt, current_ir, progress):
+        result = await self.generate(prompt, current_ir)
+        encoded = result.model_dump_json()
+        for start in range(0, len(encoded), 37):
+            await progress({"type": "code", "content": encoded[start : start + 37]})
+        return result
+
+
+def stream_events(response) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in response.iter_lines()
+        if line.startswith("data: ")
+    ]
 
 
 class RecordingGuildExporter(NullGuildTraceExporter):
@@ -98,6 +131,93 @@ def test_provider_error_is_returned_without_server_exception() -> None:
     assert response.json()["status"] == "error"
     assert response.json()["error"] == "provider unavailable"
     assert "Stack(" in response.json()["openui_lang"]
+
+
+def test_prompt_stream_matches_prompt_response_and_emits_objects() -> None:
+    client = TestClient(create_app(provider=DeterministicProvider()))
+    payload = {
+        "prompt": "make a chair",
+        "current_ir": None,
+        "target_tool": "blender",
+    }
+
+    regular = client.post("/api/prompt", json=payload).json()
+    streamed = stream_events(client.post("/api/prompt/stream", json=payload))
+
+    assert streamed[0]["type"] == "status"
+    assert streamed[0]["elapsed_seconds"] == 0
+    assert any(event["type"] == "object" for event in streamed)
+    assert streamed[-1]["type"] == "done"
+    result = streamed[-1]["result"]
+    assert result["status"] == regular["status"] == "ok"
+    assert result["ir"] == regular["ir"]
+    assert result["provider"] == regular["provider"]
+
+
+def test_prompt_stream_emits_heartbeat_during_slow_generation() -> None:
+    client = TestClient(create_app(provider=SlowProvider()))
+    started = monotonic()
+
+    events = stream_events(
+        client.post(
+            "/api/prompt/stream",
+            json={
+                "prompt": "make a chair",
+                "current_ir": None,
+                "target_tool": "blender",
+            },
+        )
+    )
+
+    assert monotonic() - started >= 1.0
+    assert any(event.get("elapsed_seconds", 0) >= 1 for event in events)
+    assert events[-1]["type"] == "done"
+
+
+def test_prompt_stream_emits_objects_while_provider_is_still_streaming() -> None:
+    client = TestClient(create_app(provider=StreamingProvider()))
+
+    events = stream_events(
+        client.post(
+            "/api/prompt/stream",
+            json={
+                "prompt": "make a chair",
+                "current_ir": None,
+                "target_tool": "blender",
+            },
+        )
+    )
+
+    first_object = next(i for i, event in enumerate(events) if event["type"] == "object")
+    validating = next(
+        i
+        for i, event in enumerate(events)
+        if event["type"] == "status" and event.get("phase") == "validating"
+    )
+    assert any(event["type"] == "code" for event in events[:first_object])
+    assert first_object < validating
+    assert events[first_object]["item"]["id"] == events[first_object]["id"]
+    assert events[-1]["type"] == "done"
+
+
+def test_prompt_stream_returns_structured_error_event() -> None:
+    client = TestClient(create_app(provider=FailingProvider()))
+
+    events = stream_events(
+        client.post(
+            "/api/prompt/stream",
+            json={
+                "prompt": "make a house",
+                "current_ir": None,
+                "target_tool": "blender",
+            },
+        )
+    )
+
+    assert events[0]["type"] == "status"
+    assert events[-1]["type"] == "error"
+    assert events[-1]["message"] == "provider unavailable"
+    assert events[-1]["result"]["status"] == "error"
 
 
 def test_prompt_returns_openui_elements_and_scene_headline() -> None:
