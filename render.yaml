@@ -1,39 +1,37 @@
 services:
   - type: web
-    name: cad-agent-api
+    name: ido-api
     runtime: docker
     plan: free
+    region: oregon
+    branch: main
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
     envVars:
       - key: CAD_AGENT_DEMO_MODE
-        value: "false"
+        value: "true"
+      - key: CAD_AGENT_PROVIDER
+        value: deterministic
       - key: CAD_AGENT_LOG_LEVEL
         value: INFO
-      - key: CAD_AGENT_PROVIDER
-        value: pioneer
-      - key: PYTHON_VERSION
-        value: "3.11.0"
       - key: PIONEER_API_KEY
         sync: false
       - key: PIONEER_MODEL_ID
         sync: false
       - key: PIONEER_BASE_URL
         value: https://api.pioneer.ai/v1
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GUILD_TRACE_ENABLED
+        value: "false"
+      - key: GUILD_OTLP_ENDPOINT
+        sync: false
       - key: CLICKHOUSE_ENABLED
-        value: "true"
+        value: "false"
       - key: CLICKHOUSE_HOST
         sync: false
-      - key: CLICKHOUSE_PORT
-        sync: false
-      - key: CLICKHOUSE_USERNAME
-        sync: false
-      - key: CLICKHOUSE_PASSWORD
-        sync: false
-      - key: CLICKHOUSE_SECURE
-        value: "true"
-      - key: CLICKHOUSE_DATABASE
-        value: default
-      - key: CLICKHOUSE_TABLE
-        value: cad_agent_traces
+      - key: COMPOSIO_ENABLED
+        value: "false"
+      - key: AIRBYTE_ENABLED
+        value: "false"

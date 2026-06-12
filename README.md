@@ -199,12 +199,12 @@ Each prompt and execution appends a JSONL record with the prompt, IR, and trace.
 
 ## Render
 
-Deploy the API on Render using the included blueprint:
+Deploy the API on [Render](https://render.com) using the included blueprint:
 
-```bash
-# Connect your repo in the Render dashboard and use render.yaml,
-# or run: render blueprint launch
-```
+1. Open [Render Blueprint deploy](https://dashboard.render.com/select-repo?type=blueprint)
+2. Connect **arora13/Ido** and select the **`main`** branch
+3. Render reads `render.yaml`, builds the Docker image (API + web panel), and health-checks `/api/health`
+4. Optional: add `PIONEER_API_KEY`, `OPENAI_API_KEY`, or sponsor env vars in the Render dashboard
 
-The service uses the repo `Dockerfile`, exposes port 8000, and health-checks
-`/api/health`. Demo mode is enabled by default in `render.yaml`.
+Demo mode is enabled by default so the service works without inference keys. Set
+`CAD_AGENT_DEMO_MODE=false` and configure a provider when you add API keys.
