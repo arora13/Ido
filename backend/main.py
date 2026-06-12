@@ -31,7 +31,6 @@ from shared.contracts import (
     IntegrationsStatus,
     OpenScadPromptRequest,
     OpenScadPromptResponse,
-    PetVisibilityRequest,
     PromptRequest,
     PromptResponse,
     RuntimeStatus,
@@ -582,9 +581,6 @@ def create_app(
     async def runtime_status() -> RuntimeStatus:
         return statuses.get()
 
-    @app.post("/api/pet/visibility", response_model=RuntimeStatus)
-    async def pet_visibility(request: PetVisibilityRequest) -> RuntimeStatus:
-        return statuses.update(pet_visible=request.visible)
 
     @app.get("/api/artifacts/{filename}")
     async def artifact(filename: str) -> FileResponse:
@@ -611,12 +607,6 @@ def create_app(
             filename="ido_blender.zip",
         )
 
-    @app.get("/ido-pet.svg")
-    async def pet_asset() -> FileResponse:
-        asset = web_dist / "ido-pet.svg"
-        if not asset.is_file():
-            raise HTTPException(status_code=404, detail="Pet asset not built")
-        return FileResponse(asset)
 
     @app.get("/", response_model=None)
     async def control_panel() -> FileResponse | HTMLResponse:
